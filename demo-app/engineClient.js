@@ -20,6 +20,9 @@ function createEngineClient({ engineUrl, apiKey, timeoutMs = 1500 }) {
     nonce: (session_id) => call('POST', '/nonce', { session_id }),
     outcome: (body) => call('POST', '/stepup/outcome', body),
     admin: (path) => call('GET', path),
+    // demo console only (the engine 404s these unless DEMO_MODE=true)
+    demoLayers: (body) => call(body ? 'POST' : 'GET', '/demo/layers', body),
+    demoEvents: (afterId = 0) => call('GET', `/demo/events?after_id=${Number(afterId) || 0}&limit=200`),
   };
 }
 

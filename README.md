@@ -13,6 +13,7 @@ demo app only.
 No Chromium download access? `export PW_CHROMIUM_PATH=/path/to/chromium`.
 Dashboard: run `npm run engine` and `npm run app`, open http://localhost:3000/admin
 (`ADMIN_USER` / `ADMIN_PASSWORD` in `.env`). Demo user: `DEMO_USER` / `DEMO_PASSWORD`.
+Judges' console: `npm run console`, then open http://localhost:3000/demo (see "Demo console" below).
 Other scripts: `npm run register-passkey [-- --force]`, `npm run netsim`.
 
 ## Layers, and what each one does NOT protect against
@@ -86,3 +87,17 @@ All Phase 1 tests still pass. Two test *settings* changed because the defaults b
 non-browser e2e test now sets `REQUIRE_DEVICE_KEY=false` (its curl-style login has no device key), and it
 keeps `TRUST_PROXY=true`, which is now interpreted as `loopback`. The fingerprint weight changed (35 -> 10);
 no Phase 1 assertion depended on it.
+
+## Demo console (`/demo`)
+`npm run console` starts the engine and app with `DEMO_MODE=true` (and `TRUST_PROXY=loopback`) and prints the URL:
+**http://localhost:3000/demo**. Three panels: the victim's bank (this browser holds the real non-extractable key),
+an attacker simulator (steals the cookie, replays it server-side), and SessionGuard's live feed with rationales.
+Top bar: *Reset demo*, layer switches (*Layer 1 checks*, *Device key*), and *Run full story*.
+- Off unless `DEMO_MODE=true` (exactly); then served only to loopback clients with a localhost `Host`. POSTs need `X-Demo-Console: 1`.
+- The attacker endpoint only attacks this app: any other target (non-loopback host, other port) is refused with 403.
+- The layer switches are an engine-side demo filter (`/demo/layers`, 404 unless the engine has `DEMO_MODE=true` too). They
+  only drop a layer's signals before fusion; checks, weights and thresholds are untouched, and with `DEMO_MODE` off the
+  filter cannot be changed.
+- The victim is `127.0.0.1`, which is not in the demo geo table, so a Lazy copy fires IP + user-agent + fingerprint
+  (and the device key), not ASN or impossible travel.
+- Perfect copy with the device key ON ends in STEP-UP (the attacker has no passkey), not instant termination.

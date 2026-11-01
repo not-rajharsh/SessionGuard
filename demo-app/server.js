@@ -15,12 +15,14 @@ const { createRiskGuard } = require('./riskGuard');
 const { createPasskeyStore } = require('./passkeys');
 const { createAdminRouter } = require('./admin');
 const { parseTrustProxy } = require('./trustProxy');
+const { createDemoRouter } = require('./demoConsole');
 const views = require('./views');
 
 const ROOT = path.join(__dirname, '..');
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest();
 const safeEqual = (a, b) => crypto.timingSafeEqual(sha(a), sha(b));
 const isAdminPath = (p) => p === '/admin' || p.startsWith('/admin/');
+const isDemoPath = (p) => p === '/demo' || p.startsWith('/demo/');
 
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
   + "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
@@ -40,6 +42,7 @@ function createApp({ store, adminStore = new session.MemoryStore(), env = proces
     origins: (env.WEBAUTHN_ORIGINS || `http://localhost:${env.APP_PORT || 3000}`).split(',').map((s) => s.trim()).filter(Boolean),
   };
   const requireDeviceKey = env.REQUIRE_DEVICE_KEY !== 'false';
+  const demoOn = env.DEMO_MODE === 'true'; // the /demo console exists only then (and only for localhost)
 
   const app = express();
   app.disable('x-powered-by');
@@ -59,9 +62,11 @@ function createApp({ store, adminStore = new session.MemoryStore(), env = proces
     name: 'sid', store, secret: env.SESSION_SECRET, resave: false, saveUninitialized: false,
     cookie: { httpOnly: true, sameSite: 'lax', maxAge: 60 * 60 * 1000 },
   });
-  app.use((req, res, next) => (isAdminPath(req.path) ? next() : userSession(req, res, next)));
-  app.use((req, res, next) => (isAdminPath(req.path) ? next() : guard.middleware(req, res, next)));
+  const skip = (p) => isAdminPath(p) || (demoOn && isDemoPath(p)); // own auth / not a user session
+  app.use((req, res, next) => (skip(req.path) ? next() : userSession(req, res, next)));
+  app.use((req, res, next) => (skip(req.path) ? next() : guard.middleware(req, res, next)));
   app.use('/admin', createAdminRouter({ engine, env, store: adminStore }));
+  if (demoOn) app.use('/demo', createDemoRouter({ engine, store, env }));
 
   const requireLogin = (req, res, next) => {
     if (req.session.user) return next();

@@ -72,6 +72,11 @@ class NonceRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=256)
 
 
+class LayersRequest(BaseModel):
+    layer1: bool | None = None
+    device_key: bool | None = None
+
+
 class SignalOut(BaseModel):
     name: str
     weight: int
@@ -101,6 +106,14 @@ def create_app(settings: Settings | None = None, store=None, geo: GeoDB | None =
     events = events or EventLog(s.sqlite_path)
     explain_fn = explain_fn or (lambda sigs, ctx: explain(sigs, ctx, settings=s))
     app = FastAPI(title="session-guard risk engine")
+
+    # DEMO_MODE only: the console can switch a layer's signals off to show what each layer buys.
+    # Outside DEMO_MODE nothing can change this dict and _layer_on() is always True, so the
+    # checks, weights and thresholds behave exactly as before.
+    layers = {"layer1": True, "device_key": True}
+
+    def _layer_on(name: str) -> bool:
+        return (not s.demo_mode) or layers[name]
 
     def require_key(authorization: str = Header(default="")):
         if not hmac.compare_digest(authorization, f"Bearer {s.engine_api_key}"):
@@ -209,9 +222,10 @@ def create_app(settings: Settings | None = None, store=None, geo: GeoDB | None =
                           [Signal("stepup_timeout", 100, "passkey step-up was not completed in time")])
 
         last_seen = store.get_last_seen(sid) or baseline
-        signals = run_checks(baseline, last_seen, cur, geo,
-                             max_kmh=s.max_travel_kmh, min_km=s.min_travel_km)
-        if binding is not None:
+        signals = (run_checks(baseline, last_seen, cur, geo,
+                              max_kmh=s.max_travel_kmh, min_km=s.min_travel_km)
+                   if _layer_on("layer1") else [])
+        if binding is not None and _layer_on("device_key"):
             signals += _proof_signals(sid, binding, req, now)
         score, action = decide(signals)
 
@@ -282,5 +296,22 @@ def create_app(settings: Settings | None = None, store=None, geo: GeoDB | None =
     @app.get("/admin/sessions/{ref}", dependencies=[Depends(require_key)])
     def admin_session(ref: str = Path(pattern=r"^[0-9a-f]{12}$")):
         return {"ref": ref, "events": events.session_events(ref)}
+
+    if s.demo_mode:  # routes do not exist at all (404) unless DEMO_MODE=true
+        @app.get("/demo/layers", dependencies=[Depends(require_key)])
+        def demo_layers_get():
+            return dict(layers)
+
+        @app.post("/demo/layers", dependencies=[Depends(require_key)])
+        def demo_layers_set(req: LayersRequest):
+            for k, v in req.model_dump().items():
+                if v is not None:
+                    layers[k] = v
+            return dict(layers)
+
+        @app.get("/demo/events", dependencies=[Depends(require_key)])
+        def demo_events(after_id: int = 0, limit: int = 200):
+            return {"latest_id": events.latest_id(),
+                    "events": events.after(max(0, after_id), max(1, min(limit, 500)))}
 
     return app

@@ -9,6 +9,7 @@
     "engine": "node scripts/engine.js",
     "attack": "node attack/attack.js",
     "demo": "node scripts/demo.js",
+    "console": "node scripts/console.js",
     "test": "npm run test:py && npm run test:js && npm run test:browser",
     "test:js": "node --test --test-concurrency=1 \"demo-app/test/*.test.js\"",
     "test:py": "cd risk-engine && .venv/bin/python -m pytest -q",

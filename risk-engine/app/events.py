@@ -90,6 +90,17 @@ class EventLog:
             rows = c.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [{**dict(r), "signals": json.loads(r["signals"])} for r in rows]
 
+    # --- demo console feed (read-only) ------------------------------------------------
+    def after(self, after_id: int = 0, limit: int = 200) -> list[dict]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM events WHERE id>? ORDER BY id ASC LIMIT ?",
+                             (after_id, limit)).fetchall()
+        return [{**dict(r), "signals": json.loads(r["signals"])} for r in rows]
+
+    def latest_id(self) -> int:
+        with self._conn() as c:
+            return int(c.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0])
+
     # --- dashboard queries ------------------------------------------------------------
     def sessions(self, limit: int = 50) -> list[dict]:
         sql = """

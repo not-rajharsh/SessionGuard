@@ -44,6 +44,8 @@ class Settings:
     llm_max_tokens: int = 512
     llm_reasoning_effort: str = ""     # e.g. "minimal"; Muse also retries with "minimal" if the reply is empty
     llm_fallback_chain: str = ""
+    # demo console only: enables /demo/* endpoints (layer switches, event feed). Off = byte-for-byte Phase 2.
+    demo_mode: bool = False
 
 
 def get_settings() -> Settings:
@@ -76,4 +78,5 @@ def get_settings() -> Settings:
         llm_max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "512")),
         llm_reasoning_effort=os.environ.get("LLM_REASONING_EFFORT", "").strip(),
         llm_fallback_chain=os.environ.get("LLM_FALLBACK_CHAIN", ""),
+        demo_mode=os.environ.get("DEMO_MODE", "").strip().lower() == "true",
     )
