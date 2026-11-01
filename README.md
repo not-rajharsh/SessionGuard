@@ -1,103 +1,97 @@
-# session-guard — Phase 2
+# SessionGuard
 
-Demo bank app (Express + Redis sessions) protected by a FastAPI risk engine, a device-bound browser
-key, passkey step-up, async LLM rationales and an admin dashboard. Everything here targets the local
-demo app only.
+**Stolen session cookies stop working the moment the attacker is no longer the user, and you can see why.**
 
-## Run
-    redis-server                  # or: docker run -p 6379:6379 redis:7
-    npm run setup                 # venv + pip + npm + Playwright Chromium
-    npm run demo                  # 3 scenarios + summary (creates/upgrades .env, registers the demo passkey)
-    npm test                      # pytest + node tests + browser tests (Chromium)
+SessionGuard is a continuous-authentication layer for web apps. It defends against session hijacking: infostealer malware copies a logged-in user's cookie, and the attacker walks in without a password or MFA prompt. SessionGuard binds each session to the browser that created it, scores every request, forces a Passkey step-up when something looks wrong, and writes a plain-English rationale for every decision.
 
-No Chromium download access? `export PW_CHROMIUM_PATH=/path/to/chromium`.
-Dashboard: run `npm run engine` and `npm run app`, open http://localhost:3000/admin
-(`ADMIN_USER` / `ADMIN_PASSWORD` in `.env`). Demo user: `DEMO_USER` / `DEMO_PASSWORD`.
-Judges' console: `npm run console`, then open http://localhost:3000/demo (see "Demo console" below).
-Other scripts: `npm run register-passkey [-- --force]`, `npm run netsim`.
+> Built for the Meta Global AI Developer Hackathon (Oct 26 – Nov 4, 2026). Track: Indie Developer. Theme: Push the Frontier.
 
-## Layers, and what each one does NOT protect against
+<!-- TODO: add a screenshot or GIF of the demo console here: ![demo](docs/demo.gif) -->
 
-| Layer | What it does | Does NOT protect against |
+## The problem
+
+Multi-factor authentication protects the login. It does nothing for the session afterwards. Whoever holds the cookie *is* the user. Infostealer malware exports browser cookies in bulk, and the attacker replays them from another machine.
+
+## What it does
+
+A request passes through up to four layers. Each layer catches attackers the previous one misses.
+
+| Layer | What it does | What it does NOT stop |
 |---|---|---|
-| **1. Deterministic checks** (IP, ASN, UA, header fingerprint, impossible travel) | Catches a replay from a different place or client. | An attacker who copies the victim's UA, headers and IP (the *adaptive attacker*: score 0, allowed; kept as a test, `layer1_gap`). The header fingerprint is a **weak** signal (weight 10): headers are copyable. Geo data is a tiny demo table. |
-| **2. Device-bound key** (non-extractable WebCrypto key, single-use 30 s nonces, per-action proofs) | A stolen cookie without the key cannot do `/transfer` (needs its own proof) or read after the 30 s presence window. The key cannot be copied out of the browser. | **Malware or XSS running on the victim's own device/origin can still *use* the key** (ask it to sign): it just can't copy it. Reads inside the 30 s window after a legitimate presence proof are not stopped by layer 2. Login-time compromise (attacker has the password and logs in with their own key). Real-time phishing relays during login. A compromised server, engine or Redis. |
-| **3. Passkey step-up** (WebAuthn via SimpleWebAuthn) | A "challenge" verdict needs a real passkey assertion; success grants 5 min of elevated trust, failure or a 60 s timeout terminates. | An attacker who also controls the victim's authenticator. The elevated window suppresses *challenge* verdicts (never *terminate*) for 5 minutes. The timeout is enforced at the next request, not by a timer. Demo passkeys live in a **virtual** authenticator, not hardware. |
-| **4. LLM rationale** | Writes a paragraph for analysts, async, after the decision. | It protects nothing: it can never change the action. Treat its text as untrusted (it is escaped, truncated, and has a template fallback). |
-| **5. Dashboard** | Session list, score timeline, signals, rationale. | Hardening of the admin login itself: single password, no rate limit, no MFA (demo-grade). |
+| **1. Deterministic checks** (IP, ASN, user-agent, header fingerprint, impossible travel) | Catches a lazy replay from a different place or client. | An attacker who copies the victim's user-agent, headers and IP. Layer 1 allows this (score 0). That gap is kept as a test. Header fingerprints are a weak signal because headers are copyable. |
+| **2. Device-bound key** (non-extractable WebCrypto key, single-use 30s nonces, per-action proofs) | A stolen cookie without the key cannot perform `/transfer`, and cannot read after the 30s presence window. The key cannot be copied out of the browser. | **Malware running on the victim's own device can still *use* the key** (ask the browser to sign); it just can't copy it. Login-time compromise and live phishing relays are also out of scope. |
+| **3. Passkey step-up** (WebAuthn) | A "challenge" verdict requires a real Passkey assertion. Success grants 5 minutes of elevated trust, failure or timeout terminates the session. | An attacker who also controls the victim's authenticator. |
+| **4. Explainer** (LLM, async) | Writes a short rationale per decision for analysts. | It protects nothing. It can never change the action. |
 
-Also out of scope: behavioral biometrics / model training (Phase 3), CSRF tokens beyond SameSite=Lax,
-and the demo's JSON passkey store (use a database in production).
+**Decision policy:** score under 30 allows, 30–70 forces step-up, over 70 terminates the session.
 
-## How it fits together
-- **Fusion** (`risk-engine/app/scoring.py`): clamped sum. IP +10, ASN +20, UA +30, fingerprint +10, travel +40;
-  `proof_valid` **-25**; `proof_stale` +35, `proof_missing` +50, `proof_expired` +50 (step-up);
-  `proof_invalid` +80 (terminate). <30 allow, 30-70 challenge, >70 terminate.
-- **Binding:** the login form generates the key *before* submitting and sends only the public key, so the
-  session is born bound. The engine's `/bind` is service-only, atomic and refuses any rebind; a new key
-  needs a new full login (new session id).
-- **Proofs:** signature over `"<nonce>|<purpose>"`, purpose = `presence` or `METHOD path`, nonce single use.
-- **Unbound sessions** (`REQUIRE_DEVICE_KEY=false`, non-browser tooling) behave exactly like Phase 1.
-- **Events** live in SQLite, keyed by a short hash of the session id (the id itself is a bearer token and is
-  never stored or shown). Live state is in Redis.
+## Demo
 
-## Configuration (`.env`, see `.env.example`)
-- `TRUST_PROXY` (default **blank = trust nobody**): `X-Forwarded-For` is read only when the TCP peer is in
-  this list of proxy IPs/CIDRs, and then only the right-most untrusted hop is used. Hop counts are rejected;
-  `true` is mapped to `loopback` with a warning. `npm run demo` sets `loopback` for its edge simulator
-  (`scripts/netsim.js`), which stands in for a real proxy so one machine can fake different locations.
-- `EXPOSE_SIGNALS=true` is demo-only; set `false` in production.
-- `LLM_PROVIDER=muse|ollama|openai_compatible|template`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`,
-  `LLM_TIMEOUT_SECONDS`, `LLM_MAX_TOKENS`, `LLM_REASONING_EFFORT`, `LLM_FALLBACK_CHAIN`. See
-  [LLM rationales](#llm-rationales) below.
-- Tunables: `PROOF_MAX_AGE_SECONDS` (30), `NONCE_TTL_SECONDS` (30), `ELEVATED_SECONDS` (300),
-  `STEPUP_TIMEOUT_SECONDS` (60).
-- WebAuthn needs `localhost` or HTTPS; origins default to `http://localhost:$APP_PORT`.
+The demo console shows the whole attack on one screen: a victim, an attacker simulator, and a live SessionGuard feed.
 
-## LLM rationales
+1. Victim makes a normal transfer. Allowed.
+2. The attacker steals the session cookie.
+3. **Lazy copy** (different browser and IP) is blocked by layer 1.
+4. **Perfect copy** (identical user-agent, headers and IP) passes layer 1 and is stopped by the device-bound key. Toggle the device key off in the console and the same attack succeeds.
 
-Rationales are written asynchronously *after* the deterministic decision. They are for analysts only and
-can never change the action.
+The attacker simulator is a script that runs the same replay a person would do by hand, against this demo app only.
 
-Providers (all use the OpenAI-style `POST /chat/completions`):
+## Quickstart
 
-| `LLM_PROVIDER` | Default base URL | Default model | Notes |
-|---|---|---|---|
-| `muse` (default) | `https://api.meta.ai/v1` | `muse-spark-1.1` | Set `LLM_API_KEY`. If the reply text is empty, retries once with doubled `LLM_MAX_TOKENS` (at least 1024) and `reasoning_effort=minimal`. |
-| `ollama` | `http://localhost:11434/v1` | `llama3.1` | Local; no key needed. |
-| `openai_compatible` | `https://api.openai.com/v1` | none (required) | Any OpenAI-compatible endpoint; set `LLM_MODEL` and usually `LLM_BASE_URL`/`LLM_API_KEY`. |
-| `template` | — | — | No LLM; deterministic template only. |
+Requirements: Node 20.12+, Python 3.10+, Redis.
 
-`LLM_BASE_URL` and `LLM_MODEL` override a provider's defaults. `LLM_MAX_TOKENS` (default 512) and
-`LLM_REASONING_EFFORT` (default blank; Muse's empty-reply retry uses `minimal`) are configurable too.
+```bash
+git clone <this-repo-url> && cd <repo-folder>
+redis-server                  # or: docker run -p 6379:6379 redis:7
+npm run setup                 # venv + pip + npm + Playwright Chromium
+npm run demo                  # three attack scenarios + summary
+npm test                      # pytest + node tests + browser tests
+```
 
-**Fallback chain.** Set `LLM_FALLBACK_CHAIN` to a comma-separated list, e.g.
-`LLM_FALLBACK_CHAIN=muse,ollama,template`. Providers are tried in order; a timeout, HTTP error, empty
-reply or unknown provider moves on to the next. If none succeed, the deterministic template is used. With
-no chain configured, the engine tries `LLM_PROVIDER` and then the template.
+<!-- TODO: add the exact command and URL to start the demo console (DEMO_MODE=true ...) -->
 
-**Privacy.** Only sanitized, truncated signals are sent to the LLM: a small JSON document containing the
-already-made decision, the route, signal names/weights, and attacker-controlled strings confined to
-`untrusted_data` fields. Raw session ids, cookies, passwords, device keys and the full request never leave
-the engine. The model's output is treated as untrusted: cleaned, truncated, stored separately, and rendered
-as text (never HTML).
+Dashboard: run `npm run engine` and `npm run app`, then open `http://localhost:3000/admin`. Demo and admin credentials are generated into `.env` on first run (see `.env.example`). `.env` is git-ignored.
 
-## Notes on Phase 1 tests
-All Phase 1 tests still pass. Two test *settings* changed because the defaults became secure: the Phase 1
-non-browser e2e test now sets `REQUIRE_DEVICE_KEY=false` (its curl-style login has no device key), and it
-keeps `TRUST_PROXY=true`, which is now interpreted as `loopback`. The fingerprint weight changed (35 -> 10);
-no Phase 1 assertion depended on it.
+## How it works
 
-## Demo console (`/demo`)
-`npm run console` starts the engine and app with `DEMO_MODE=true` (and `TRUST_PROXY=loopback`) and prints the URL:
-**http://localhost:3000/demo**. Three panels: the victim's bank (this browser holds the real non-extractable key),
-an attacker simulator (steals the cookie, replays it server-side), and SessionGuard's live feed with rationales.
-Top bar: *Reset demo*, layer switches (*Layer 1 checks*, *Device key*), and *Run full story*.
-- Off unless `DEMO_MODE=true` (exactly); then served only to loopback clients with a localhost `Host`. POSTs need `X-Demo-Console: 1`.
-- The attacker endpoint only attacks this app: any other target (non-loopback host, other port) is refused with 403.
-- The layer switches are an engine-side demo filter (`/demo/layers`, 404 unless the engine has `DEMO_MODE=true` too). They
-  only drop a layer's signals before fusion; checks, weights and thresholds are untouched, and with `DEMO_MODE` off the
-  filter cannot be changed.
-- The victim is `127.0.0.1`, which is not in the demo geo table, so a Lazy copy fires IP + user-agent + fingerprint
-  (and the device key), not ASN or impossible travel.
-- Perfect copy with the device key ON ends in STEP-UP (the attacker has no passkey), not instant termination.
+- **Fusion** (`risk-engine/app/scoring.py`): clamped sum of signals. IP change +10, ASN +20, user-agent +30, fingerprint +10, impossible travel +40; valid proof -25; stale +35, missing +50, expired +50, invalid +80.
+- **Binding:** the login page generates the key before submitting and sends only the public key, so the session is born bound. Rebinding is refused; a new key needs a new full login.
+- **Proofs:** a signature over `"<nonce>|<purpose>"`, where purpose is `presence` or `METHOD path`. Each nonce is single-use.
+- **Events** live in SQLite, keyed by a short hash of the session id (the id is a bearer token and is never stored). Live state is in Redis.
+- **Fails closed:** if the engine errors, the app returns 503 instead of letting the request through (configurable).
+
+## The AI explainer
+
+After each decision, an async job turns the fired signals into a short analyst-style rationale and stores it next to the event. The dashboard shows which provider wrote it.
+
+- Providers: `muse` (Meta Muse Spark, default), `ollama` (local Llama), `openai_compatible` (any OpenAI-style endpoint), and `template` (deterministic, no LLM).
+- `LLM_FALLBACK_CHAIN` (for example `muse,ollama,template`) tries providers in order on timeout or error. The template is always the last resort, so the system works with the LLM off.
+- **The LLM never decides.** The action is computed first, independently. Even if a model replies "ALLOW", the decision does not change (tested).
+- **Prompt-injection hardening:** attacker-controlled strings (user-agent, headers) are truncated, sanitized and sent only as quoted data fields. A test confirms an injected user-agent does not change the outcome. Output is escaped on the dashboard (XSS test included).
+
+**Implementation status (honest):** the Muse Spark adapter is implemented and tested against a stub server. It has **not** been verified against the live API, because no API key was available. The demo runs on the template provider unless a key or a local Ollama model is configured.
+
+## Testing
+
+`npm test` runs Python (risk engine), Node (app and middleware) and browser tests with a real WebAuthn virtual authenticator. Covered: legitimate vs replayed sessions, the adaptive attacker, proof replay and cross-action reuse, forced rebinding, spoofed `X-Forwarded-For`, fail-closed behavior, passkey step-up, prompt injection and dashboard XSS.
+
+## Limitations
+
+- Attacks are simulated against our own demo app. There is no evaluation on real-world traffic.
+- Malware that controls the victim's live browser can still use the device key.
+- The geo-IP table is a small demo table. Demo passkeys use a virtual authenticator, not hardware.
+- The admin login is demo-grade (single password, no rate limit, no MFA). The passkey store is a JSON file.
+- No behavioral biometrics. That layer is planned, not built.
+- Muse Spark has not been tested live (see above).
+
+## Built during the hackathon
+
+All code in this repository was written between Oct 26 and Nov 4, 2026, and the commit history shows it. The code was written with the Muse Code agent. Third-party libraries are used as dependencies and are not claimed as our work: Express, FastAPI, Redis, SQLite, SimpleWebAuthn, Playwright, scikit-learn (if used), and the Node and Python standard libraries.
+
+## Security and ethics
+
+Everything here targets the local demo app. The attacker simulator refuses non-local targets. The (planned) behavioral layer would collect timing statistics only, never key identities or typed text. Only sanitized signals are ever sent to an LLM.
+
+## License
+
+MIT. See `LICENSE`.
